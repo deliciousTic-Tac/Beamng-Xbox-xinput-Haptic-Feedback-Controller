@@ -4,6 +4,8 @@ Xbox controller haptic feedback for BeamNG.drive, version **1.0.24.0**.
 The Lua mod sends vehicle telemetry to an x64 XInput proxy, which controls the
 body motors and impulse triggers through Windows.Gaming.Input.
 
+**This project was created using AI.**
+
 ## Download
 
 [Download the ready-to-install ZIP](https://github.com/deliciousTic-Tac/beamng-revlimit-haptics/releases/download/v1.0.24.0/beamng-revlimit-haptics-1.0.24.0.zip)
