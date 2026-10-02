@@ -1,0 +1,28 @@
+#include <winver.h>
+#include "version.h"
+1 VERSIONINFO
+ FILEVERSION HAPTICS_VERSION_COMMA
+ PRODUCTVERSION HAPTICS_VERSION_COMMA
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "FileDescription", "BeamNG Controller Haptics - XInput proxy\0"
+   VALUE "FileVersion", HAPTICS_VERSION_STRING
+   VALUE "InternalName", "ControllerHapticsProxy\0"
+   VALUE "OriginalFilename", "XInput1_4.dll\0"
+   VALUE "ProductName", "Xbox Haptic Feedback Controller\0"
+   VALUE "ProductVersion", HAPTICS_VERSION_STRING
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

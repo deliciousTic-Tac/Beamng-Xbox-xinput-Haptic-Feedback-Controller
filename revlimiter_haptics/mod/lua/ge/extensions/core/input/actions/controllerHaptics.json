@@ -1,0 +1,10 @@
+{
+  "controllerHapticsToggleSettings": {
+    "cat": "controllerHaptics",
+    "order": 900,
+    "ctx": "tlua",
+    "onDown": "extensions.load('controllerHapticsUI'); if extensions.controllerHapticsUI then extensions.controllerHapticsUI.toggle() end",
+    "title": "Open Xbox Haptic Feedback Controller settings",
+    "desc": "Show or hide the Xbox Haptic Feedback Controller settings window"
+  }
+}
