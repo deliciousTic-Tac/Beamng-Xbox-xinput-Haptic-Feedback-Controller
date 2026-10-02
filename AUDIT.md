@@ -1,99 +1,118 @@
-# Préparation du dépôt privé — 2 octobre 2026
+# Private repository audit - October 2, 2026
 
-## Périmètre
+## Scope
 
-La version retenue est `1.0.24.0`, définie dans `xbox_proxy/version.h`.
-Les sources actuelles du proxy et les six fichiers de `revlimiter_haptics/mod`
-ont été copiés dans ce dépôt autonome. Le code de fonctionnement, les scripts
-de build, les tests et le script de packaging sont conservés sans modification.
-Le guide du proxy a été adapté pour retirer les références aux anciens rapports
-locaux non copiés. Les sources originales restent dans leurs dossiers initiaux.
+Version `1.0.24.0` is defined in `xbox_proxy/version.h`.
+The current proxy sources and the six files in `revlimiter_haptics/mod`
+were copied into this standalone repository. Runtime code, tests and
+build/packaging scripts were preserved. Documentation was adapted for the
+repository and subsequently translated into English. The original source
+folders remain available outside this repository.
 
-Les noms `xbox_proxy` et `revlimiter_haptics` sont conservés à l'intérieur du
-dépôt pour respecter les chemins relatifs du build et des tests. Le dossier
-Git est uniquement à la racine de ce dépôt `revlimit_haptics`.
+The internal `xbox_proxy` and `revlimiter_haptics` folder names preserve
+the relative paths used by the source tools and tests. The Git directory
+exists only at the root of this `revlimit_haptics` repository.
 
-## Structure analysée et exclusions
+## Initial inventory and exclusions
 
-L'inventaire initial couvre 77 fichiers de projet, 46 fichiers de dépendances
-de test installées et 4 670 fichiers de l'ancien environnement Python.
-Les sources, configurations, scripts, documents, journaux et reçus de build
-ont été inspectés. Les archives de distribution ont été ouvertes, y compris
-leurs ZIP imbriqués; les chaînes des exécutables et de la DLL ont été examinées.
-Les dépendances installées et l'environnement Python ont été inventoriés et
-exclus en bloc; ils ne font pas partie des fichiers proposés pour le commit.
+The initial inventory covered 77 project files, 46 installed test-dependency
+files and 4,670 files in the old Python virtual environment.
+Sources, configuration, scripts, documentation, logs and build receipts
+were inspected. Distribution archives were opened, including nested ZIP
+files; executable and DLL strings were examined. Installed dependencies
+and the virtual environment were inventoried and excluded as whole folders.
 
-Exclus du périmètre copié :
+The following items were excluded from the copied source tree:
 
-- `xbox_proxy/out/` : compilation, logs, reçus, manifests, paquets et copies
-  intermédiaires des sources.
-- `xbox_proxy/.test-deps/` : dépendances installées, extensions natives `.pyd`
-  et caches; elles se réinstallent avec `requirements-test.txt`.
-- Les anciens rapports locaux `COMPTE_RENDU_CROISE_AUDIT_HAPTIQUES.md`,
-  `RAPPORT_REVISION_HAPTIQUES.md` et `RAPPORT_POINTS_RESIDUELS_20260922.md` :
-  historique de travail, facultatif pour le build.
-- `revlimiter_haptics/.venv/` et les caches Python : environnement local,
-  contenant notamment des chemins personnels historiques.
-- `revlimiter_haptics/bridge/`, ses tests et `BRIDGE_README.md` : ancien bridge
-  SDL2 utilisant NRH1, distinct du protocole BCH1 de la version actuelle.
-- L'ancien `revlimiter_haptics/README.md` : guide de la version 1.0.15.
-- `revlimiter_haptics/revlimiter_haptics_mod.zip` : ancien paquet généré,
-  remplacé par les sources Lua et le packaging actuel.
+- `xbox_proxy/out/`: binaries, intermediate outputs, logs, build receipts,
+  manifests, packages and temporary source copies.
+- `xbox_proxy/.test-deps/`: installed test dependencies, native Python
+  extensions (`.pyd`) and caches.
+- Historical local reports `COMPTE_RENDU_CROISE_AUDIT_HAPTIQUES.md`,
+  `RAPPORT_REVISION_HAPTIQUES.md` and `RAPPORT_POINTS_RESIDUELS_20260922.md`:
+  optional working history. Their original filenames are retained here
+  for identification.
+- `revlimiter_haptics/.venv/` and Python caches: local environment files
+  containing historical personal paths.
+- `revlimiter_haptics/bridge/`, its tests and `BRIDGE_README.md`: the old
+  SDL2 bridge uses NRH1, separate from the current version's BCH1 protocol.
+- The old `revlimiter_haptics/README.md`: documentation for version 1.0.15.
+- `revlimiter_haptics/revlimiter_haptics_mod.zip`: an older generated package.
 
-Le `.gitignore` protège également les futurs builds, DLL/EXE, archives, caches,
-logs, dumps, sauvegardes, fichiers temporaires, configurations locales,
-credentials, clés SSH et matériels de signature.
+The `.gitignore` also excludes common build outputs, DLL/EXE files, archives,
+caches, logs, dumps, backups, temporary files, local configuration,
+credentials, SSH keys and signing material.
 
-## Binaires
+## Binaries and distribution
 
-| Élément | Nécessité | Traitement Git |
+| Item | Purpose | Distribution |
 | --- | --- | --- |
-| Proxy `XInput1_4.dll` | Nécessaire dans `BeamNG.drive/Bin64` à l'exécution | Exclu; reconstruit depuis le C++, les exports et les ressources de version |
-| `native_tests.exe`, `load_test.exe` | Validation native et smoke-test facultatif | Exclus; reconstruits par `build.cmd` |
-| `.obj`, `.lib`, `.exp`, `.res`, `.pdb`, `.ilk` | Intermédiaires du compilateur et du linker | Exclus; recréés par les outils de build |
-| ZIP Lua et ZIP de distribution | Installation et diffusion de la DLL avec le mod correspondant | Exclus; générés par `tools/artifacts.ps1` |
-| Extensions Python `.pyd` | Dépendances de test installées | Exclues; réinstallées avec les dépendances Python |
-| XInput système et composants WinRT Windows | Dépendances du système d'exploitation | Fournis par Windows; aucune copie dans le dépôt |
-| DLL SDL2 et ancien bridge | Ancienne architecture NRH1 | Exclus du périmètre de cette version BCH1 |
+| Proxy `XInput1_4.dll` | Required in the game's `Bin64` folder at runtime | Included in the release archive; excluded from Git source history |
+| `native_tests.exe`, `load_test.exe` | Native regression tests and an optional smoke test | Development artifacts; excluded from Git and the install archive |
+| `.obj`, `.lib`, `.exp`, `.res`, `.pdb`, `.ilk` | Compiler and linker intermediates | Excluded from Git and the install archive |
+| Lua mod ZIP | Installs the telemetry mod paired with the proxy | Included in the release archive; excluded from Git source history |
+| Native Python extensions (`.pyd`) | Installed test dependencies | Excluded from Git and the install archive |
+| System XInput and Windows WinRT components | Operating-system dependencies | Provided by Windows |
+| SDL2 DLLs and the old bridge | Previous NRH1 architecture | Outside the scope of this BCH1 version |
 
-Aucun binaire précompilé n'est nécessaire dans le dépôt source. Le CRT est
-lié statiquement (`/MT`); les bibliothèques du Windows SDK proviennent du SDK.
+The ready-to-install release supplies all project-specific runtime binaries.
+Its source tree requires no precompiled binaries. The CRT is statically linked
+(`/MT`); Windows SDK libraries belong to the development toolchain.
 
-## Contrôle des données sensibles
+## Sensitive-data checks
 
-Les contrôles recherchent notamment les signatures de clés privées, tokens,
-JWT, credentials, chaînes de connexion, certificats, clés SSH, adresses réseau,
-chemins UNC, URLs et chemins locaux personnels. Aucun secret ni élément
-d'infrastructure professionnelle n'a été détecté dans les sources retenues.
+Checks covered private-key signatures, tokens, JWTs, credentials, connection
+strings, certificates, SSH keys, network addresses, UNC paths, URLs and
+personal absolute paths. No secrets or professional-infrastructure details
+were detected in the selected sources.
 
-La seule adresse réseau utilisée est `127.0.0.1`, boucle locale sur le port
-UDP 26780. Les chaînes `1.0.24.0` sont des versions, pas des adresses réseau.
-Les URLs présentes dans le guide et le build sont la documentation Microsoft
-et le service public de timestamp DigiCert.
+The only network address used is `127.0.0.1`, loopback on UDP port 26780.
+Strings such as `1.0.24.0` are version numbers. URLs in the documentation
+and source tools point to Microsoft documentation and DigiCert's public
+timestamp service.
 
-`CODE_SIGN_CERT_THUMBPRINT` et `CODE_SIGN_TIMESTAMP_URL` sont des noms de
-variables d'environnement. Aucun certificat, clé privée, empreinte de
-certificat réelle ni credential n'est fourni. Le script de signature utilise
-le certificat disponible localement sans exporter sa clé.
+`CODE_SIGN_CERT_THUMBPRINT` and `CODE_SIGN_TIMESTAMP_URL` are environment
+variable names. No actual certificate thumbprint, certificate, private key
+or credential is supplied. The signing script uses a local certificate
+without exporting its private key.
 
-Les vérifications initiales ne garantissent pas la sûreté des ajouts futurs :
-les fichiers à committer doivent être réexaminés avant publication, y compris
-pour un dépôt privé.
+The initial audit does not establish that future additions are safe.
+Review files before committing and publishing them, including in a
+private repository.
 
-## Vérifications du dossier autonome
+## Initial repository verification
 
-- 23 fichiers texte retenus, sans binaire précompilé.
-- Sources C++, Lua, JSON, tests et scripts de build/packaging identiques aux
-  originaux avant normalisation Git des fins de ligne.
-- Gitleaks 8.30.1 : aucun secret détecté. L'outil provient de sa release officielle;
-  le SHA-256 de l'archive a été contrôlé avant exécution.
-- Contrôle complémentaire : aucun chemin personnel absolu, adresse IPv4 privée,
-  chemin UNC, credential embarqué, email ou chaîne suspecte à forte entropie.
-- 7 tests Lua réussis, 4 tests de garde-fous du packaging réussis; 3 tests sautés
-  parce que les DLL nécessaires à leurs fixtures ne sont pas dans le dépôt.
-- Syntaxe Python, JSON, PowerShell et grammaire C++ contrôlées.
-- MSVC et le Windows SDK ne sont pas disponibles sur le poste de préparation :
-  aucune nouvelle compilation native ni validation en jeu n'a été réalisée.
+- 23 text files were retained, with no precompiled binaries in Git.
+- C++, Lua, JSON, tests and source tools matched the originals before
+  Git line-ending normalization.
+- Gitleaks 8.30.1 found no secrets. The scanner came from its official
+  release; the archive's SHA-256 was checked before execution.
+- Additional checks found no personal absolute paths, private IPv4
+  addresses, UNC paths, embedded credentials, email addresses or
+  suspicious high-entropy strings.
+- Seven Lua tests and four applicable packaging guardrail tests passed.
+  Three tests were skipped because their DLL fixtures were absent.
+- Python, JSON and PowerShell syntax and C++ grammar were checked.
+- MSVC and the Windows SDK were unavailable on the preparation machine;
+  no new native compilation or in-game validation was performed.
 
-Les métadonnées du commit utilisent le nom du compte GitHub et son adresse
-noreply, pour éviter la publication d'une adresse personnelle ou professionnelle.
+Commits use the GitHub account name and its noreply email address to avoid
+publishing a personal or professional email address.
+
+## Release verification
+
+The `v1.0.24.0` release is a private, unsigned Windows x64 prerelease.
+The DLL comes from the validated build of September 25, 2026, which preceded
+creation of this Git repository. Its version, exports, PE protections and
+SHA-256 match the build receipt. All 17 code, test and source-tool files
+match the initial repository commit after line-ending normalization;
+differences are limited to documentation.
+
+The install archive includes only the DLL, its matching six-file Lua mod
+ZIP, installation instructions and checksums. Archive entries and nested
+ZIP contents were verified. Gitleaks and additional string checks found
+no secrets or professional-infrastructure details in the release content.
+
+The English documentation update changes the installation text and
+checksums in the outer archive. The DLL and inner Lua mod ZIP remain
+byte-for-byte identical to the original release files.

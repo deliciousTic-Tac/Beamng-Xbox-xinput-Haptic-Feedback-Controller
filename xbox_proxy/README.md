@@ -1,135 +1,83 @@
-# Xbox Haptic Feedback Controller — sources 1.0.24.0
+# Xbox Haptic Feedback Controller - 1.0.24.0
 
-Révision complétée le 24 septembre 2026. `version.h` est la source unique de version.
-Les DLL et EXE sont des artefacts générés, exclus du dépôt source.
-Recompiler cette version avant de créer un paquet de distribution.
-Le candidat **1.0.24.0** est produit dans `out/test` par le pipeline de build.
+The [ready-to-install release](https://github.com/deliciousTic-Tac/beamng-revlimit-haptics/releases/tag/v1.0.24.0)
+contains the compiled DLL and its matching Lua mod ZIP.
+Follow the [installation instructions](../README.md#installation).
 
-## Architecture et limites
+## Architecture
 
-Le mod Lua canonique est `../revlimiter_haptics/mod`. Le protocole véhicule BCH1
-émet 96 octets vers UDP `127.0.0.1:26780`, au maximum à 60 Hz. La DLL est un proxy
-x64 XInput1_4 avec sorties WinRT pour les moteurs et les gâchettes. Son pump est
-synchrone, appelé depuis XInput, sans worker ni service externe. `DllMain` reste minimal.
-Avec le CRT statique `/MT`, il conserve les notifications de threads : aucun appel
-à `DisableThreadLibraryCalls`.
+The Lua mod is in `../revlimiter_haptics/mod`. Its BCH1 vehicle protocol sends
+96-byte UDP packets to `127.0.0.1:26780` at up to 60 Hz. The x64 XInput1_4 proxy
+uses WinRT to drive the controller's body motors and impulse triggers. Its
+synchronous pump runs from XInput calls; no background worker or external
+service is installed. `DllMain` remains minimal.
 
-Prérequis d'exécution : Windows 10/11 x64, BeamNG x64 et manette compatible WGI.
-La compatibilité BeamNG 0.39 mentionnée par le code doit être vérifiée en jeu.
-Le format BCH1 et ses ordinals sont conservés. Ne pas mélanger ZIP Lua et DLL
-de candidats différents : utiliser le même paquet et son `manifest.json`.
+The statically linked CRT (`/MT`) retains thread notifications; the proxy does
+not call `DisableThreadLibraryCalls`.
 
-Limites qui restent à valider :
+Runtime requirements are Windows 10/11 x64, BeamNG x64 and a WGI-compatible
+controller. BeamNG 0.39 compatibility mentioned in the code must be checked
+in game. The BCH1 wire format and XInput export ordinals are preserved.
+Use the DLL and Lua mod ZIP from the same release.
 
-- La sélection WGI compare l'état actif de XInput 0 avec tous les Gamepads WGI.
-  Elle exige une correspondance unique confirmée sur deux lectures espacées de
-  100 ms minimum. Sans entrée distinctive (bouton, gâchette ou stick) ou en cas
-  d'ambiguïté, la DLL conserve la vibration classique XInput et n'envoie pas
-  d'effets WGI. La correspondance réelle multimanette reste à tester en jeu.
-- Le watchdog de télémétrie (250 ms) dépend des appels XInput. Si ces appels
-  cessent, aucun worker indépendant n'envoie de zéro. L'arrêt forcé/crash dépend
-  du pilote et de Windows; aucun cleanup de processus ne peut y être garanti.
-  Un compagnon autonome fiable devrait piloter lui-même WGI pendant toute la
-  session; un simple processus lancé à l'arrêt ne peut pas identifier sûrement
-  la même manette. Aucun compagnon persistant ou service n'est installé.
-- `XInputEnable(FALSE)` force zéro, inhibe WGI et ferme le socket; TRUE réactive
-  les sorties avec la dernière consigne de moteurs ordinaires. Les effets
-  télémétriques anciens ne sont pas rejoués. Les jeux ne sont pas tenus d'appeler
-  cette API lors de chaque changement de focus sous Windows 10/11.
-- La manette appariée est mise en cache seulement si elle annonce `IAgileObject`.
-  Le cache est sérialisé, vérifié dans la liste WGI chaque seconde et invalidé au
-  retrait, à une erreur de lecture ou de vibration, ou à un désaccord d'entrée.
-  Les autres références COM restent locales. Une consigne différente conserve
-  la cadence maximale de 16 ms; l'énumération ne tourne plus à cette cadence.
-- Tant qu'aucune manette WGI n'est associée et qu'aucune vibration n'est demandée,
-  le proxy n'initialise pas WinRT et n'énumère pas les manettes. Cela évite de
-  bloquer le thread XInput de BeamNG au démarrage lorsqu'une manette est absente.
-  La première consigne non nulle déclenche immédiatement la détection.
+## Known limitations
 
-## Compiler et vérifier
+- WGI controller selection compares the active input of XInput controller 0
+  against all WGI gamepads. A unique match must be confirmed by two readings
+  at least 100 ms apart. Without distinctive input (a button, trigger or stick),
+  or if matching is ambiguous, the DLL retains ordinary XInput vibration
+  without sending WGI effects. Real multi-controller matching still needs
+  in-game testing.
+- The 250 ms telemetry watchdog depends on XInput calls. If those calls stop,
+  there is no independent worker to send zero vibration. Behavior after a crash
+  or forced shutdown depends on the driver and Windows; process cleanup cannot
+  guarantee that the motors stop. A reliable standalone companion would need
+  to own WGI output throughout the session. A process started only at shutdown
+  cannot reliably identify the same controller.
+- `XInputEnable(FALSE)` requests zero vibration, disables WGI output and closes
+  the socket. TRUE restores output using the latest ordinary motor request;
+  stale telemetry effects are not replayed. Games are not required to call this
+  API on every focus change under Windows 10/11.
+- A paired controller is cached only if it exposes `IAgileObject`. Access is
+  serialized, membership in the WGI list is checked every second, and the cache
+  is invalidated on removal, reading or vibration errors, or an input mismatch.
+  Other COM references remain local. Changed output is limited to one update
+  every 16 ms; device enumeration does not run at that frequency.
+- With no paired WGI controller and no requested vibration, the proxy defers
+  WinRT initialization and controller enumeration. This avoids blocking
+  BeamNG's XInput thread at startup when a controller is absent. The first
+  nonzero vibration request starts discovery immediately.
 
-Installer Visual Studio 2022 / Build Tools, charge **Desktop development with C++**,
-toolset x64 et Windows SDK, ainsi que Python 3 et `lupa` (`python -m pip install lupa`).
-`HAPTICS_VS_ROOT` permet de préciser une installation MSVC personnalisée.
-`HAPTICS_PYTHON` peut désigner le chemin absolu de Python.
+## Settings and diagnostics
 
-Depuis n'importe quel dossier, lancer le script par son chemin :
+**F6** opens **Xbox Haptic Feedback Controller**; the shortcut can be changed in
+**Controls**. Settings take effect within approximately 0.1 seconds of
+simulation time, plus a tick. The UI writes only values that change.
+The four published `electrics` values are approximate visual indicators,
+not measurements of the physical motors.
 
-```powershell
-& 'C:\chemin\projet\xbox_proxy\build.cmd' test
-```
+Logs are stored at `%LOCALAPPDATA%\BeamNG-Controller-Haptics\proxy.log`,
+with timestamps and severity levels. The file restarts when it reaches 1 MiB.
+If the local application-data path is missing or too long, logging is skipped.
+UDP errors include the WinSock error code, with retries every five seconds.
+The DLL does not send diagnostic feedback to the in-game UI.
 
-Le build optimisé (`/O2 /GL /LTCG`, CRT `/MT`) conserve CFG/ASLR/DEP, ajoute
-VERSIONINFO, exécute les régressions natives avec WGI simulé et les tests Lua 5.1,
-puis vérifie exports, protections, version et identité des entrées de compilation.
-Le build échoue si une étape ne passe pas. Il n'écrase pas les anciennes DLL.
+If telemetry is absent, check that the mod is enabled, a vehicle is loaded and
+custom protocols are enabled. An occupied UDP port prevents the proxy from
+receiving telemetry; another bridge or telemetry listener may be using it.
 
-Le smoke-test réel, facultatif, se lance explicitement après compilation :
+## Rollback
 
-```powershell
-& .\out\test\load_test.exe 'C:\chemin\projet\xbox_proxy\out\test\XInput1_4.dll'
-```
+Close BeamNG, remove this release's mod ZIP from the active user folder and
+restore the exact DLL backup made before installation. If there was no local
+`XInput1_4.dll` before installation, remove the DLL supplied by this release.
 
-Il teste STA/MTA et concurrence, appelle la vraie API WGI et demande zéro avant
-déchargement. Ne pas le lancer pendant une session BeamNG utilisant le même port.
+A Steam file verification can restore official game files, but it does not
+replace a backup of a previous proxy DLL.
 
-## Créer un paquet cohérent
+## References
 
-Après un build réussi :
-
-```powershell
-powershell -NoProfile -File .\tools\artifacts.ps1 -Action Package -Mode test
-```
-
-Un dossier `out/test/package-...` reçoit un paquet neuf contenant la DLL,
-le ZIP Lua, les sources, un manifeste et les empreintes SHA-256. Chaque entrée
-ZIP est relue et vérifiée. Toute modification de source depuis le build ou
-substitution de DLL invalide le packaging. `test` signifie **candidat non signé**.
-
-Pour une diffusion signée : checkout Git propre avec commit, certificat Authenticode
-déjà disponible avec sa clé privée, `CODE_SIGN_CERT_THUMBPRINT` configuré, puis
-`build.cmd release` et `Package -Mode release`. Sans certificat, le mode release
-refuse de démarrer. La clé n'est ni créée ni exportée par ces scripts.
-`CODE_SIGN_TIMESTAMP_URL` peut remplacer l'URL de timestamp. Le pipeline ne crée
-pas automatiquement un dépôt, un commit, un tag ou une publication distante.
-
-## Installation manuelle du candidat et retour arrière
-
-1. Fermer BeamNG. Identifier son dossier réel contenant `Bin64\BeamNG.drive.x64.exe`
-   et **son dossier utilisateur actif**, via le launcher BeamNG. Ces deux dossiers
-   sont normalement différents : le ZIP va dans le dossier utilisateur, pas dans Steam.
-2. Si `Bin64\XInput1_4.dll` existe, conserver une copie datée et son SHA-256 hors
-   de Bin64. Ne jamais écraser cette sauvegarde lors d'une installation ultérieure.
-   Si la DLL était absente, noter explicitement cette absence.
-3. Copier la DLL du paquet validé dans **ce Bin64 uniquement**, jamais dans Windows/System32.
-4. Copier le ZIP du sous-dossier `mods` du même paquet vers `mods` du dossier utilisateur.
-   Désactiver les anciennes versions du protocole afin d'éviter des paquets concurrents.
-5. Activer le mod et **Other protocols** dans les options BeamNG si nécessaire.
-   Charger un véhicule et tester F6, vibrations, pause et changement de véhicule.
-
-Pour revenir en arrière, fermer BeamNG, retirer uniquement le ZIP de ce candidat,
-puis restaurer la copie exacte de la DLL précédente. Si aucune DLL locale n'était
-présente à l'origine, retirer seulement la DLL du candidat. Ne pas supprimer un
-fichier préexistant sans pouvoir le restaurer. Une vérification Steam peut restaurer
-les fichiers officiels du jeu, mais ne remplace pas une sauvegarde du proxy précédent.
-
-## Réglages et diagnostic
-
-F6 ouvre **Xbox Haptic Feedback Controller**; touche configurable dans Controls.
-Les réglages prennent effet au plus après environ 0,1 s de simulation (plus un tick).
-L'UI écrit uniquement les valeurs qui changent. Les quatre valeurs `electrics`
-publiées sont des indicateurs approximatifs, pas une mesure des moteurs réels.
-
-Logs : `%LOCALAPPDATA%\BeamNG-Controller-Haptics\proxy.log`, horodatés, avec niveau,
-limités à 1 Mio puis recommencés. En l'absence de ce chemin ou s'il est trop long,
-le log est omis; aucun fallback vers une racine de disque. Les erreurs UDP incluent
-le code WinSock et un retry toutes les 5 secondes. Aucune liaison de diagnostic
-retour DLL → UI n'est implémentée.
-
-## Contrat et références
-
-- Microsoft : [XInputEnable](https://learn.microsoft.com/en-us/windows/win32/api/xinput/nf-xinput-xinputenable).
-- Microsoft : [Gamepad et vibrations](https://learn.microsoft.com/en-us/windows/uwp/gaming/gamepad-and-vibration).
-- Microsoft : [DisableThreadLibraryCalls et CRT statique](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-disablethreadlibrarycalls).
-- Le [rapport de préparation du dépôt](../AUDIT.md) décrit les sources retenues,
-  les exclusions et le contrôle des données sensibles.
+- Microsoft: [XInputEnable](https://learn.microsoft.com/en-us/windows/win32/api/xinput/nf-xinput-xinputenable).
+- Microsoft: [Gamepad and vibration](https://learn.microsoft.com/en-us/windows/uwp/gaming/gamepad-and-vibration).
+- Microsoft: [DisableThreadLibraryCalls and the static CRT](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-disablethreadlibrarycalls).
+- [Repository audit](../AUDIT.md): selected sources, exclusions and sensitive-data checks.
