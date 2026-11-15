@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <wrl/client.h>
+#include "version.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "runtimeobject.lib")
@@ -87,6 +88,8 @@ std::atomic<bool> g_directionalShiftBody{false};
 std::atomic<INT32> g_directionalShiftDirection{1};
 std::atomic<bool> g_wgiAvailable{false};
 std::atomic<bool> g_hapticsEnabled{true};
+std::atomic<UINT32> g_nativeAppliedMotors{0};
+std::atomic<bool> g_nativeApplied{false};
 std::atomic<ULONGLONG> g_packets{0}, g_lastPacket{0};
 // Updated continuously through the BeamNG vehicle telemetry packet.
 std::atomic<float> g_rtIntensity{1.0f}, g_absIntensity{0.50f}, g_rtStart{0.90f}, g_shiftIntensity{0.55f};
@@ -109,6 +112,34 @@ bool g_sawGamepads = false;
 ULONGLONG g_lastPairLog = 0;
 bool g_pairEverLogged = false;
 
+// All diagnostics/mixer state is protected by g_outputLock. No worker added.
+enum class TimedCall { Initialize, Scan, Output, Uninitialize, Count };
+struct Timing { double last = 0, peak = 0; UINT32 slow = 0; };
+Timing g_timing[static_cast<int>(TimedCall::Count)]{};
+class CallTimer {
+ public:
+  explicit CallTimer(TimedCall call) : call_(call) { QueryPerformanceCounter(&start_); }
+  ~CallTimer() {
+    LARGE_INTEGER end{}, frequency{};
+    QueryPerformanceCounter(&end); QueryPerformanceFrequency(&frequency);
+    if (!frequency.QuadPart) return;
+    auto& t = g_timing[static_cast<int>(call_)];
+    t.last = (end.QuadPart - start_.QuadPart) * 1000.0 / frequency.QuadPart;
+    t.peak = std::max(t.peak, t.last);
+    if (t.last >= 5.0) ++t.slow;
+  }
+ private:
+  TimedCall call_; LARGE_INTEGER start_{};
+};
+UINT32 g_mixMode = 0; // 0 maximum, 1 addition, 2 custom priority, 3 legacy directional
+float g_nativeGain = 1.f, g_customGain = 1.f;
+ULONGLONG g_mixReceived = 0, g_lastSlowLog = 0;
+HRESULT g_outputError = S_OK;
+sockaddr_in g_diagnosticPeer{};
+UINT32 g_diagnosticSequence = 0;
+bool g_diagnosticPending = false;
+ULONGLONG g_lastDiagnosticReply = 0;
+
 // Only XInputEnable waits: ordinary polling skips a busy pump. COM calls and
 // changes to RuntimeState stay serialized even when XInput uses several threads.
 class OutputGuard {
@@ -126,11 +157,17 @@ class OutputGuard {
 
 class ApartmentScope {
  public:
-  ApartmentScope() : result_(RoInitialize(RO_INIT_MULTITHREADED)) {
+  ApartmentScope() {
+    CallTimer timer(TimedCall::Initialize);
+    result_ = RoInitialize(RO_INIT_MULTITHREADED);
     if (result_ == RPC_E_CHANGED_MODE) result_ = RoInitialize(RO_INIT_SINGLETHREADED);
   }
-  ~ApartmentScope() { if (SUCCEEDED(result_)) RoUninitialize(); }
+  ~ApartmentScope() {
+    CallTimer timer(TimedCall::Uninitialize);
+    if (SUCCEEDED(result_)) RoUninitialize();
+  }
   bool ready() const { return SUCCEEDED(result_); }
+  HRESULT result() const { return result_; }
   ApartmentScope(const ApartmentScope&) = delete;
   ApartmentScope& operator=(const ApartmentScope&) = delete;
  private:
@@ -146,6 +183,7 @@ struct RuntimeState {
   float shiftStartRPM = 0.f;
   bool gearInitialized = false, wasShifting = false, startupArmed = true, vehicleInitialized = false;
   bool engineInitialized = false, wasEngineRunning = false, shiftPending = false;
+  bool shiftAwaitingConfirmation = false;
 };
 RuntimeState g_runtime;
 
@@ -231,12 +269,13 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
                bool& startupArmed, bool& vehicleInitialized,
                bool& engineInitialized, bool& wasEngineRunning,
                ULONGLONG& shiftPendingUntil, ULONGLONG& shiftPendingStarted,
-               float& shiftStartRPM, bool& shiftPending) {
+               float& shiftStartRPM, bool& shiftPending, bool& shiftAwaitingConfirmation) {
   USHORT lt = 0, rt = 0;
   const bool valid = valid_packet(p) && (p.flags & 1) && (p.flags & 4);
   if (!valid) {
     limiterUntil = absUntil = shiftUntil = startupUntil = 0;
     shiftPending = false;
+    shiftAwaitingConfirmation = false;
     g_triggerLeft.store(0); g_triggerRight.store(0);
     g_shiftBodyLeft.store(0); g_shiftBodyRight.store(0);
     g_directionalShiftBody.store(false);
@@ -253,6 +292,7 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
     if (newVehicle) {
       limiterUntil = absUntil = shiftUntil = startupUntil = 0;
       shiftPending = false;
+      shiftAwaitingConfirmation = false;
       gearInitialized = wasShifting = false;
       lastGear = 0;
       startupArmed = false;
@@ -262,16 +302,24 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
       wasEngineRunning = false;
     }
     const bool engineRunning = p.engineRunning > .5f;
-    if (engineRunning && (!engineInitialized || !wasEngineRunning)) startupUntil = now + 1200;
+    // First telemetry establishes a baseline; loading an already-running car is
+    // not a start. The starter signal below still works on the very first packet.
+    if (engineInitialized && engineRunning && !wasEngineRunning) startupUntil = now + 1200;
     engineInitialized = true;
     wasEngineRunning = engineRunning;
     const bool gearChanged = gearInitialized && p.gearIndex != lastGear && p.gearIndex != 0 && lastGear != 0;
     const bool shiftStarted = gearInitialized && p.isShifting > .5f && !wasShifting;
+    if (shiftAwaitingConfirmation && (now > shiftPendingUntil || shiftStarted)) {
+      shiftAwaitingConfirmation = false;
+    }
     if (gearChanged) shiftDirection = p.gearIndex > lastGear ? 1 : -1;
     if (gearChanged && p.shiftIntensity > 0.f) {
       // Race/manual gearboxes can assert isShifting before gearIndex changes.
       // Use the confirmed gear transition to choose the correct side.
-      shiftUntil = now + 180;
+      // An RPM-inferred pulse may already have played for this transition.
+      // Confirm its direction without restarting or extending that pulse.
+      if (!shiftAwaitingConfirmation) shiftUntil = now + 180;
+      shiftAwaitingConfirmation = false;
       shiftPending = false;
     } else if (shiftStarted && p.shiftIntensity > 0.f) {
       // Hold a pending event long enough for the delayed gearIndex update.
@@ -296,6 +344,8 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
       shiftDirection = delta > 0.f ? -1 : 1;
       shiftUntil = now + 180;
       shiftPending = false;
+      shiftAwaitingConfirmation = true;
+      shiftPendingUntil = now + 550;
     }
   }
   if (shiftPending && now >= shiftPendingUntil) {
@@ -303,6 +353,8 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
     // direction, but do not let the pending state suppress future shifts.
     shiftUntil = now + 115;
     shiftPending = false;
+    shiftAwaitingConfirmation = true;
+    shiftPendingUntil = now + 550;
   }
   if (valid && p.throttle > .08f && p.limit > 0.f) {
     const float ratio = p.rpm / p.limit;
@@ -367,6 +419,7 @@ void calculate(const Packet& p, ULONGLONG now, ULONGLONG& limiterUntil, ULONGLON
 }
 
 void close_socket() {
+  g_diagnosticPending = false;
   if (g_socket != INVALID_SOCKET) { closesocket(g_socket); g_socket = INVALID_SOCKET; }
   if (g_winsockStarted) { WSACleanup(); g_winsockStarted = false; }
 }
@@ -418,13 +471,61 @@ void clear_telemetry_state(RuntimeState& state) {
   state = RuntimeState{};
 }
 
+bool diagnostic_query(const char* text, const sockaddr_in& peer, ULONGLONG now) {
+  UINT32 seq = 0, vehicle = 0, mode = 0;
+  float nativeGain = 0, customGain = 0; char extra = 0;
+  if (peer.sin_family != AF_INET || peer.sin_addr.s_addr != htonl(INADDR_LOOPBACK) ||
+      sscanf_s(text, "BCQ1 %u %u %u %f %f %c", &seq, &vehicle, &mode,
+               &nativeGain, &customGain, &extra, 1u) != 5 ||
+      mode > 3 || !finite_unit(nativeGain) || !finite_unit(customGain)) return false;
+  g_mixMode = mode; g_nativeGain = nativeGain; g_customGain = customGain;
+  g_mixReceived = now;
+  g_diagnosticPeer = peer; g_diagnosticSequence = seq; g_diagnosticPending = true;
+  return true;
+}
+
+void reply_diagnostics(ULONGLONG now) {
+  if (!g_diagnosticPending || g_socket == INVALID_SOCKET ||
+      now - g_lastDiagnosticReply < 32) return;
+  g_diagnosticPending = false; g_lastDiagnosticReply = now;
+  const bool fresh = g_runtime.received && now - g_runtime.received <= PACKET_TIMEOUT_MS;
+  const bool wgi = g_hasApplied && g_wgiAvailable.load() && g_hapticsEnabled.load();
+  const bool native = !wgi && g_nativeApplied.load() && g_hapticsEnabled.load();
+  const bool applied = wgi || native;
+  GamepadVibration v = wgi ? g_lastApplied : GamepadVibration{};
+  if (native) {
+    const UINT32 packed = g_nativeAppliedMotors.load();
+    v.LeftMotor = (packed & 65535u) / 65535.0;
+    v.RightMotor = (packed >> 16) / 65535.0;
+  }
+  const auto& init = g_timing[0]; const auto& scan = g_timing[1];
+  const auto& output = g_timing[2]; const auto& uninit = g_timing[3];
+  char buffer[1400]{};
+  const int length = _snprintf_s(buffer, _countof(buffer), _TRUNCATE,
+    "BCD1 {\"version\":\"%s\",\"seq\":%u,\"vehicle\":%u,\"telemetry\":%u,"
+    "\"paired\":%u,\"enabled\":%u,\"applied\":%u,\"backend\":%u,\"error\":%ld,"
+    "\"left\":%.5f,\"right\":%.5f,\"lt\":%.5f,\"rt\":%.5f,"
+    "\"initMs\":%.3f,\"initPeakMs\":%.3f,\"scanMs\":%.3f,\"scanPeakMs\":%.3f,"
+    "\"outputMs\":%.3f,\"outputPeakMs\":%.3f,\"uninitPeakMs\":%.3f,\"slowCalls\":%u}",
+    HAPTICS_VERSION_STRING, g_diagnosticSequence, g_runtime.last.vehicle, fresh ? 1u : 0u,
+    g_selectedPad ? 1u : 0u, g_hapticsEnabled.load() ? 1u : 0u, applied ? 1u : 0u,
+    wgi ? 2u : (native ? 1u : 0u),
+    static_cast<long>(g_outputError), v.LeftMotor, v.RightMotor, v.LeftTrigger, v.RightTrigger,
+    init.last, init.peak, scan.last, scan.peak, output.last, output.peak, uninit.peak,
+    init.slow + scan.slow + output.slow + uninit.slow);
+  if (length > 0) sendto(g_socket, buffer, length, 0,
+      reinterpret_cast<const sockaddr*>(&g_diagnosticPeer), sizeof(g_diagnosticPeer));
+}
+
 void pump_telemetry(ULONGLONG now) {
   if (g_socket != INVALID_SOCKET) {
     // Limit one input call to 16 datagrams. Other local telemetry users cannot
     // flood an XInput call and stall BeamNG's input thread.
-    char buffer[sizeof(Packet)];
+    char buffer[sizeof(Packet) + 1]{};
     for (int i = 0; i < MAX_DATAGRAMS_PER_PUMP; ++i) {
-      const int n = recv(g_socket, buffer, sizeof(buffer), 0);
+      sockaddr_in peer{}; int peerSize = sizeof(peer);
+      const int n = recvfrom(g_socket, buffer, sizeof(Packet), 0,
+          reinterpret_cast<sockaddr*>(&peer), &peerSize);
       if (n == SOCKET_ERROR) {
         const int error = WSAGetLastError();
         if (error == WSAEMSGSIZE) continue; // Datagram discarded, bounded by the loop.
@@ -433,6 +534,11 @@ void pump_telemetry(ULONGLONG now) {
           clear_telemetry_state(g_runtime);
         }
         break;
+      }
+      buffer[n] = '\0';
+      if (n >= 5 && !memcmp(buffer, "BCQ1 ", 5)) {
+        if (strlen(buffer) == static_cast<size_t>(n)) diagnostic_query(buffer, peer, now);
+        continue;
       }
       if (n != sizeof(Packet)) continue;
       Packet packet{};
@@ -457,24 +563,32 @@ void pump_telemetry(ULONGLONG now) {
               g_runtime.wasShifting, g_runtime.startupArmed, g_runtime.vehicleInitialized,
               g_runtime.engineInitialized, g_runtime.wasEngineRunning,
               g_runtime.shiftPendingUntil, g_runtime.shiftPendingStarted,
-              g_runtime.shiftStartRPM, g_runtime.shiftPending);
+              g_runtime.shiftStartRPM, g_runtime.shiftPending, g_runtime.shiftAwaitingConfirmation);
   } else {
     clear_telemetry_state(g_runtime);
   }
+}
+
+double mix_body(USHORT native, USHORT custom) {
+  const double a = native / 65535.0 * g_nativeGain;
+  const double b = custom / 65535.0 * g_customGain;
+  if (g_mixMode == 0) return std::max(a, b);
+  if (g_mixMode == 2) return b > 0 ? b : a;
+  return std::min(1.0, a + b);
 }
 
 GamepadVibration compose_vibration() {
   GamepadVibration v{};
   if (!g_hapticsEnabled.load()) return v;
   USHORT bodyLeft = g_bodyLeft.load(), bodyRight = g_bodyRight.load();
-  if (g_directionalShiftBody.load()) {
+  if (g_mixMode == 3 && g_directionalShiftBody.load()) {
     if (g_directionalShiftDirection.load() >= 0) bodyLeft = 0;
     else bodyRight = 0;
   }
-  v.LeftMotor = std::min(1.0, (bodyLeft + g_shiftBodyLeft.load()) / 65535.0);
-  v.RightMotor = std::min(1.0, (bodyRight + g_shiftBodyRight.load()) / 65535.0);
-  v.LeftTrigger = g_triggerLeft.load() / 65535.0;
-  v.RightTrigger = g_triggerRight.load() / 65535.0;
+  v.LeftMotor = mix_body(bodyLeft, g_shiftBodyLeft.load());
+  v.RightMotor = mix_body(bodyRight, g_shiftBodyRight.load());
+  v.LeftTrigger = g_triggerLeft.load() / 65535.0 * g_customGain;
+  v.RightTrigger = g_triggerRight.load() / 65535.0 * g_customGain;
   return v;
 }
 
@@ -490,7 +604,7 @@ bool zero_vibration(const GamepadVibration& v) {
 
 // XInput has no documented ID that can be compared with a WGI Gamepad ID.
 // Correlate a distinctive live input instead of assuming the two lists share
-// an order. Ambiguous or idle inputs never establish a new pairing.
+// an order. Idle inputs may pair only if both APIs expose a single controller.
 struct PadInput {
   bool valid = false;
   UINT32 buttons = 0;
@@ -548,7 +662,11 @@ bool matching_input(const XINPUT_GAMEPAD& x, const PadInput& w) {
          axis_matches(x.sThumbRX, w.rightX) && axis_matches(x.sThumbRY, w.rightY);
 }
 
-int unique_matching_pad(const XINPUT_GAMEPAD& x, const PadInput* readings, UINT32 count) {
+int unique_matching_pad(const XINPUT_GAMEPAD& x, const PadInput* readings, UINT32 count,
+                        bool soleXInput = false) {
+  // Idle pairing is allowed only when BOTH APIs expose a single controller,
+  // and their readings agree. Multiple controllers still need active input.
+  if (soleXInput && count == 1 && matching_input(x, readings[0])) return 0;
   if (!distinctive_input(x)) return -1;
   int unique = -1;
   for (UINT32 i = 0; i < count; ++i) {
@@ -584,10 +702,16 @@ void release_pad(IGamepad*& pad) {
   if (pad) { pad->Release(); pad = nullptr; }
 }
 
+HRESULT write_pad(IGamepad* pad, const GamepadVibration& v) {
+  CallTimer timer(TimedCall::Output);
+  g_outputError = pad->put_Vibration(v);
+  return g_outputError;
+}
+
 void drop_selected_pad(bool silence) {
   if (silence && g_selectedPad) {
     const GamepadVibration zero{};
-    g_selectedPad->put_Vibration(zero);
+    write_pad(g_selectedPad, zero);
   }
   release_pad(g_selectedPad);
   g_hasApplied = false;
@@ -597,6 +721,7 @@ void drop_selected_pad(bool silence) {
 // Called with g_outputLock held, inside an initialized apartment. The selected
 // object is retained only if it advertises agility for cross-apartment calls.
 bool scan_gamepads(ULONGLONG now) {
+  CallTimer timer(TimedCall::Scan);
   g_lastPadScan = now;
   XINPUT_STATE state{};
   if (!g_getState || g_getState(0, &state) != ERROR_SUCCESS) {
@@ -640,7 +765,17 @@ bool scan_gamepads(ULONGLONG now) {
   }
   if (g_selectedPad) return true;
 
-  const int chosen = unique_matching_pad(state.Gamepad, readings, count);
+  bool soleXInput = count == 1;
+  if (soleXInput) {
+    for (DWORD id = 1; id < XUSER_MAX_COUNT; ++id) {
+      XINPUT_STATE other{};
+      if (g_getState(id, &other) != ERROR_DEVICE_NOT_CONNECTED) {
+        soleXInput = false;
+        break;
+      }
+    }
+  }
+  const int chosen = unique_matching_pad(state.Gamepad, readings, count, soleXInput);
   if (chosen < 0) { release_pad(g_pairCandidate); return false; }
   IGamepad* match = gamepads[chosen].Get();
   ComPtr<IAgileObject> agile;
@@ -656,7 +791,7 @@ bool scan_gamepads(ULONGLONG now) {
     if (!g_pairEverLogged || now - g_lastPairLog >= 10000) {
       g_pairEverLogged = true;
       g_lastPairLog = now;
-      logline("[INFO][WGI] XInput 0 paired with a unique active Gamepad");
+      logline("[INFO][WGI] XInput 0 paired with a unique matching Gamepad");
     }
     return true;
   }
@@ -703,6 +838,7 @@ void apply_vibration(ULONGLONG now, bool force = false) {
   // usable from that existing apartment. Match it before giving up.
   ApartmentScope apartment;
   if (!apartment.ready()) {
+    g_outputError = apartment.result();
     g_wgiAvailable.store(false);
     g_hasApplied = false;
     log_throttled("[ERROR][WGI] RoInitialize failed", now);
@@ -719,7 +855,7 @@ void apply_vibration(ULONGLONG now, bool force = false) {
     g_hasApplied = false;
     return;
   }
-  const bool applied = SUCCEEDED(g_selectedPad->put_Vibration(v));
+  const bool applied = SUCCEEDED(write_pad(g_selectedPad, v));
   if (!applied) {
     drop_selected_pad(false);
     release_pad(g_pairCandidate);
@@ -729,6 +865,7 @@ void apply_vibration(ULONGLONG now, bool force = false) {
   g_hasApplied = true;
   g_lastApplied = v;
   g_wgiAvailable.store(true);
+  g_nativeApplied.store(false);
 }
 
 void pump_haptics() noexcept {
@@ -737,17 +874,32 @@ void pump_haptics() noexcept {
   const ULONGLONG now = GetTickCount64();
   if (now - g_lastPump.load() < PUMP_INTERVAL_MS) return;
   g_lastPump.store(now);
+  if (now - g_mixReceived > 1000) {
+    g_mixMode = 0; g_nativeGain = g_customGain = 1.f;
+  }
   if (g_hapticsEnabled.load()) {
     ensure_socket(now);
     pump_telemetry(now);
   }
   apply_vibration(now);
+  reply_diagnostics(GetTickCount64());
+  UINT32 slow = 0;
+  for (const auto& timing : g_timing) slow += timing.slow;
+  static UINT32 loggedSlow = 0;
+  if (slow != loggedSlow && now - g_lastSlowLog >= 10000) {
+    char message[256]{};
+    _snprintf_s(message, _countof(message), _TRUNCATE,
+        "[WARN][WGI] Calls >=5ms: %u; peak ms init=%.3f scan=%.3f output=%.3f uninit=%.3f",
+        slow, g_timing[0].peak, g_timing[1].peak, g_timing[2].peak, g_timing[3].peak);
+    logline(message); loggedSlow = slow; g_lastSlowLog = now;
+  }
 }
 } // namespace
 
 extern "C" __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD id, XINPUT_STATE* state) noexcept {
   load_real();
   const DWORD result = g_getState ? g_getState(id, state) : ERROR_NO_GAMEPAD;
+  if (id == 0 && result != ERROR_SUCCESS) g_nativeApplied.store(false);
   pump_haptics();
   return result;
 }
@@ -758,7 +910,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI XInputSetState(DWORD id, XINPUT_VI
   if (v && id == 0) { g_bodyLeft.store(v->wLeftMotorSpeed); g_bodyRight.store(v->wRightMotorSpeed); }
   pump_haptics();
   // When WGI is ready it applies all four motors atomically; forwarding would clear RT/LT.
-  return g_wgiAvailable.load() ? ERROR_SUCCESS : (g_setState ? g_setState(id,v) : ERROR_NO_GAMEPAD);
+  if (g_wgiAvailable.load()) return ERROR_SUCCESS;
+  const DWORD result = g_setState ? g_setState(id,v) : ERROR_NO_GAMEPAD;
+  if (result == ERROR_SUCCESS) {
+    g_nativeAppliedMotors.store(static_cast<UINT32>(v->wLeftMotorSpeed) |
+        (static_cast<UINT32>(v->wRightMotorSpeed) << 16));
+  }
+  g_nativeApplied.store(result == ERROR_SUCCESS);
+  return result;
 }
 extern "C" __declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD a,DWORD b,XINPUT_CAPABILITIES* c) noexcept { load_real(); return g_getCaps ? g_getCaps(a,b,c) : ERROR_NO_GAMEPAD; }
 extern "C" __declspec(dllexport) void WINAPI XInputEnable(BOOL enabled) noexcept {

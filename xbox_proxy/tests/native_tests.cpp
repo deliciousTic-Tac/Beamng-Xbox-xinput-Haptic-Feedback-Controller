@@ -37,6 +37,7 @@ static void reset_output_state() {
   g_directionalShiftBody = false;
   g_hapticsEnabled = true;
   g_wgiAvailable = false;
+  g_nativeApplied = false;
   g_hasApplied = false;
   g_selectedPad = nullptr;
   g_pairCandidate = nullptr;
@@ -53,7 +54,48 @@ static void compute(const Packet& p, ULONGLONG now) {
   calculate(p, now, r.limiterUntil, r.absUntil, r.shiftUntil, r.startupUntil, r.lastVehicle,
             r.lastGear, r.shiftDirection, r.gearInitialized, r.wasShifting, r.startupArmed,
             r.vehicleInitialized, r.engineInitialized, r.wasEngineRunning, r.shiftPendingUntil,
-            r.shiftPendingStarted, r.shiftStartRPM, r.shiftPending);
+            r.shiftPendingStarted, r.shiftStartRPM, r.shiftPending, r.shiftAwaitingConfirmation);
+}
+static void test_startup_baseline_and_starter() {
+  clear_telemetry_state(g_runtime);
+  auto p = packet(); p.engineRunning = 1; p.startupIntensity = 1;
+  compute(p, 1000);
+  check(g_runtime.startupUntil == 0 && g_shiftBodyLeft == 0 && g_shiftBodyRight == 0,
+        "loading a running engine does not invent a startup");
+  clear_telemetry_state(g_runtime); // Simulate timeout/pause recovery.
+  compute(p, 2000);
+  check(g_runtime.startupUntil == 0, "telemetry recovery does not replay startup");
+  p.engineRunning = 0; p.starterActive = 1; compute(p, 2100);
+  check(g_shiftBodyLeft > 0 || g_shiftBodyRight > 0, "starter vibrates before engine runs");
+  p.starterActive = 0; p.engineRunning = 1; compute(p, 2200);
+  check(g_runtime.startupUntil == 3400, "real off-to-running transition starts sequence");
+  p.vehicle = 2; compute(p, 2300);
+  check(g_runtime.startupUntil == 0, "vehicle change resets engine baseline");
+}
+static void test_shift_confirmation_does_not_replay() {
+  clear_telemetry_state(g_runtime);
+  auto p = packet(); p.rpm = 4000; compute(p, 1000);
+  p.isShifting = 1; compute(p, 1016);
+  p.rpm = 4600; compute(p, 1100);
+  check(g_triggerLeft > 0 && g_runtime.shiftAwaitingConfirmation, "RPM rise infers downshift");
+  const auto deadline = g_runtime.shiftUntil;
+  p.gearIndex = 2; compute(p, 1300);
+  check(g_runtime.shiftUntil == deadline && g_triggerLeft == 0,
+        "delayed gear confirmation never replays expired pulse");
+  p.isShifting = 0; compute(p, 1316);
+  p.isShifting = 1; p.gearIndex = 3; compute(p, 1332);
+  check(g_triggerRight > 0 && g_runtime.shiftUntil == 1512, "next actual shift still fires");
+
+  clear_telemetry_state(g_runtime);
+  p = packet(); compute(p, 2000);
+  p.isShifting = 1; compute(p, 2016);
+  compute(p, 2600); // No RPM or gear information: timeout fallback.
+  const auto fallbackDeadline = g_runtime.shiftUntil;
+  p.gearIndex = 4; compute(p, 2730);
+  check(g_runtime.shiftUntil == fallbackDeadline && g_triggerRight == 0,
+        "fallback pulse also consumes delayed confirmation");
+  clear_telemetry_state(g_runtime);
+  check(!g_runtime.shiftAwaitingConfirmation, "stop clears deduplication history");
 }
 static void test_routing_and_disable() {
   g_setState = real_set; g_enable = real_enable; g_testApply = sink;
@@ -157,6 +199,15 @@ static void test_controller_pairing() {
   check(unique_matching_pad(x, pads, 3) == 1, "a distinctive stick position can pair a controller");
   pads[1].valid = false;
   check(unique_matching_pad(x, pads, 3) == -1, "unreadable devices cannot be paired");
+  x = XINPUT_GAMEPAD{};
+  pads[0] = PadInput{}; pads[0].valid = true;
+  check(unique_matching_pad(x, pads, 1, true) == 0, "sole controller pairs while idle");
+  check(unique_matching_pad(x, pads, 1, false) == -1, "multiple XInput pads require active input");
+  check(unique_matching_pad(x, pads, 2, true) == -1, "multiple WGI pads require active input");
+  pads[0].valid = false;
+  check(unique_matching_pad(x, pads, 1, true) == -1, "sole unreadable pad is rejected");
+  pads[0].valid = true; pads[0].buttons = 4;
+  check(unique_matching_pad(x, pads, 1, true) == -1, "sole mismatched reading is rejected");
 }
 static void test_socket_recovery() {
   close_socket(); g_socketRetryAt = 0;
@@ -182,6 +233,17 @@ static void test_socket_recovery() {
   check(g_runtime.received == 15100, "valid datagram received");
   pump_telemetry(15351);
   check(g_runtime.received == 0 && g_triggerRight == 0, "stale telemetry cleared");
+  const char query[] = "BCQ1 7 1 1 0.5 0.8";
+  check(sendto(sender, query, sizeof(query)-1, 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == sizeof(query)-1,
+        "send diagnostic query over actual loopback");
+  pump_telemetry(15360);
+  check(g_diagnosticPending && g_mixMode == 1 && g_nativeGain == .5f, "query controls mixer");
+  reply_diagnostics(15360);
+  u_long nonblocking = 1; ioctlsocket(sender, FIONBIO, &nonblocking);
+  char reply[1400]{};
+  const int replySize = recv(sender, reply, sizeof(reply)-1, 0);
+  check(replySize > 0 && !memcmp(reply,"BCD1 ",5) && strstr(reply,"\"seq\":7") &&
+        strstr(reply,"\"telemetry\":0"), "diagnostic round trip includes sequence and stale telemetry");
   char oversized[200]{};
   sendto(sender, oversized, sizeof(oversized), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
   pump_telemetry(15400);
@@ -193,12 +255,51 @@ static void test_socket_recovery() {
   failNonblocking = false;
   WSACleanup();
 }
+static void test_mixer_and_diagnostic_validation() {
+  reset_output_state();
+  g_bodyLeft=30000; g_bodyRight=30000; g_shiftBodyRight=20000;
+  g_triggerRight=10000; g_directionalShiftBody=true; g_directionalShiftDirection=1;
+  g_nativeGain=g_customGain=1; g_mixMode=0;
+  auto v=compose_vibration();
+  check(v.LeftMotor==30000/65535.0 && v.RightMotor==30000/65535.0, "maximum preserves native road signal on both motors");
+  g_mixMode=1; v=compose_vibration();
+  check(v.RightMotor==50000/65535.0, "addition mixes signals");
+  g_mixMode=2; v=compose_vibration();
+  check(v.RightMotor==20000/65535.0 && v.LeftMotor==30000/65535.0, "priority affects only active custom motor");
+  g_mixMode=3; v=compose_vibration();
+  check(v.LeftMotor==0 && v.RightMotor==50000/65535.0, "legacy keeps directional suppression");
+  g_customGain=0; g_mixMode=2; v=compose_vibration();
+  check(v.RightMotor==30000/65535.0 && v.RightTrigger==0, "zero custom gain restores native and mutes triggers");
+  g_nativeGain=.5f; g_customGain=.5f; g_mixMode=0; v=compose_vibration();
+  check(std::fabs(v.LeftMotor-15000/65535.0)<1e-9 && std::fabs(v.RightTrigger-5000/65535.0)<1e-9,
+        "independent gains scale native body and custom triggers");
+  g_mixMode=1; g_nativeGain=g_customGain=1; g_bodyRight=g_shiftBodyRight=50000;
+  check(compose_vibration().RightMotor==1, "addition clamps at full strength");
+  sockaddr_in peer{}; peer.sin_family=AF_INET; peer.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  check(!diagnostic_query("BCQ1 1 1 4 1 1",peer,1000), "unknown mixer mode rejected");
+  check(!diagnostic_query("BCQ1 1 1 0 nan 1",peer,1000), "nonfinite gain rejected");
+  check(!diagnostic_query("BCQ1 1 1 0 1 2",peer,1000), "excessive gain rejected");
+  check(!diagnostic_query("BCQ1 1 1 0 1 1 extra",peer,1000), "trailing input rejected");
+  peer.sin_addr.s_addr=htonl(0xC0A80101);
+  check(!diagnostic_query("BCQ1 1 1 0 1 1",peer,1000), "nonloopback diagnostic rejected");
+  g_mixMode=0; g_nativeGain=g_customGain=1; reset_output_state();
+}
+static void test_timing_records_slow_calls() {
+  const UINT32 previous = g_timing[0].slow;
+  { CallTimer timer(TimedCall::Initialize); Sleep(8); }
+  check(g_timing[0].last >= 5 && g_timing[0].peak >= g_timing[0].last &&
+        g_timing[0].slow == previous + 1, "slow calls are measured and counted");
+}
 int main() {
   try {
     test_routing_and_disable();
     test_idle_startup_defers_wgi();
     test_packet_state();
+    test_startup_baseline_and_starter();
+    test_shift_confirmation_does_not_replay();
     test_controller_pairing();
+    test_mixer_and_diagnostic_validation();
+    test_timing_records_slow_calls();
     test_socket_recovery();
     puts("PASS: native regression suite (mock WGI/XInput, real ephemeral UDP)");
     return 0;

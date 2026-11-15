@@ -1,6 +1,6 @@
-# beamng-revlimit-haptics
+# Xbox Haptic Feedback Controller
 
-Xbox controller haptic feedback for BeamNG.drive, version **1.0.24.0**.
+Xbox controller haptic feedback for BeamNG.drive, version **1.0.26.0**.
 The Lua mod sends vehicle telemetry to an x64 XInput proxy, which controls the
 body motors and impulse triggers through Windows.Gaming.Input.
 
@@ -8,9 +8,8 @@ body motors and impulse triggers through Windows.Gaming.Input.
 
 ## Download
 
-[Download the ready-to-install ZIP](https://github.com/deliciousTic-Tac/beamng-revlimit-haptics/releases/download/v1.0.24.0/beamng-revlimit-haptics-1.0.24.0.zip)
-from the [v1.0.24.0 release](https://github.com/deliciousTic-Tac/beamng-revlimit-haptics/releases/tag/v1.0.24.0).
-The repository and release are private; sign in with an account that has access.
+[Download the complete 1.0.26.0 package](https://github.com/deliciousTic-Tac/Beamng-Xbox-xinput-Haptic-Feedback-Controller/releases/download/v1.0.26.0/Xbox-Haptic-Feedback-Controller-1.0.26.0-test.zip)
+from the [v1.0.26.0 prerelease](https://github.com/deliciousTic-Tac/Beamng-Xbox-xinput-Haptic-Feedback-Controller/releases/tag/v1.0.26.0).
 
 The archive includes the compiled `XInput1_4.dll`, the matching Lua mod ZIP,
 installation instructions and SHA-256 checksums. This is an **unsigned
@@ -28,7 +27,7 @@ prerelease**; compatibility must still be checked in game on your installation.
 2. Back up any existing `XInput1_4.dll` in the game's `Bin64` folder.
 3. Copy `Bin64/XInput1_4.dll` from the archive into the game's `Bin64` folder,
    next to `BeamNG.drive.x64.exe`.
-4. Copy `mods/beamng-revlimit-haptics-1.0.24.0-mod.zip` into
+4. Copy `mods/Xbox-Haptic-Feedback-Controller-1.0.26.0-test.zip` into
    `BeamNG\current\mods` in your active BeamNG user folder. Keep this mod ZIP
    compressed. Use the BeamNG launcher to locate the active user folder.
 5. Disable older versions of the mod, enable this version and enable
@@ -52,7 +51,8 @@ diagnostics, known limitations and rollback instructions.
 ## Network and local files
 
 BCH1 sends 96-byte UDP packets to `127.0.0.1:26780` at up to 60 Hz.
-The proxy listens only on loopback.
+The proxy listens only on loopback. Local status queries share this port;
+the in-game panel reports output status, WGI timings and configurable body mixing.
 
 The proxy log is stored at
 `%LOCALAPPDATA%\BeamNG-Controller-Haptics\proxy.log`.
@@ -60,5 +60,6 @@ Local settings, logs, dumps, caches, installed dependencies, credentials and
 signing material are excluded from Git.
 
 Source code is in `xbox_proxy/` and `revlimiter_haptics/mod/`.
-The [repository audit](AUDIT.md) documents source selection, sensitive-data
-checks and binary provenance.
+See [CHANGELOG.md](CHANGELOG.md) for the changes since 1.0.24.0.
+The [repository audit](AUDIT.md) is a historical record of the initial import
+and 1.0.24.0 prerelease; it does not certify subsequent versions.

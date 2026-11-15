@@ -20,6 +20,8 @@ DEFAULTS = {
     "controllerHapticsShiftMode": 1, "controllerHapticsStartupIntensity": 100,
     "controllerHapticsStartupInterval": 300, "controllerHapticsAbsSensitivity": 69,
     "controllerHapticsBrakeLockIntensity": 85,
+    "controllerHapticsMixMode": 0, "controllerHapticsNativeGain": 100,
+    "controllerHapticsCustomGain": 100,
 }
 
 
@@ -115,7 +117,29 @@ class LuaTests(unittest.TestCase):
         mod.onExtensionUnloaded()
         self.assertTrue(self.lua.globals().core_input_categories.controllerHaptics.foreign)
 
-    def test_modscript_has_single_flat_bootstrap_load(self):
+    def test_bootstrap_waits_for_input_category_module(self):
+        mod = self.load("lua/ge/extensions/controllerHapticsBootstrap.lua")
+        mod.onExtensionLoaded()
+        for _ in range(3):
+            mod.onUpdate()
+        self.lua.execute("core_input_categories={}")
+        mod.onUpdate()
+        self.assertEqual(self.lua.globals().core_input_categories.controllerHaptics.title,
+                         "Xbox Haptics Controller")
+        self.lua.execute("core_input_categories.controllerHaptics=nil")
+        mod.onUpdate()
+        self.assertIsNone(self.lua.globals().core_input_categories.controllerHaptics)
+        # Registration stops after success; the callback stays stable for BeamNG.
+        mod.onExtensionUnloaded()
+        self.assertIsNone(self.lua.globals().core_input_categories.controllerHaptics)
+        self.lua.execute("core_input_categories=nil")
+        mod.onExtensionLoaded()
+        mod.onExtensionUnloaded()
+        self.lua.execute("core_input_categories={}")
+        mod.onUpdate()
+        self.assertIsNone(self.lua.globals().core_input_categories.controllerHaptics)
+
+    def test_modscript_has_flat_loads(self):
         self.lua.execute("""
           events={}
           extensions={load=function(name)
@@ -125,7 +149,81 @@ class LuaTests(unittest.TestCase):
         self.lua.execute((MOD / "scripts/beamng_controller_haptics/modScript.lua").read_text())
         events = self.lua.globals().events
         self.assertEqual(events[1], "load:controllerHapticsBootstrap")
-        self.assertIsNone(events[2])
+        self.assertEqual(events[2], "load:controllerHapticsDiagnostics")
+        self.assertIsNone(events[3])
+
+    def test_lock_uses_braked_loaded_wheels_and_forward_speed(self):
+        self.lua.execute('''
+          forwardSpeed=20
+          obj.getVelocity=function() return {dot=function() return forwardSpeed end} end
+          obj.getDirectionVector=function() return {} end
+          electrics.values.brake_input=1
+          wheel={radius=.3,angularVelocity=0,downForceRaw=1000,brakeTorque=1000,brakingTorque=500}
+          wheels.wheels={[0]=wheel}
+        ''')
+        mod=self.protocol(); out=self.lua.table()
+        mod.fillStruct(out,1/60)
+        self.assertEqual(out.lockRatio,1)
+        for field,value in [('brakingTorque',0),('brakeTorque',0),('downForceRaw',0),('isBroken',True)]:
+            wheel=self.lua.globals().wheel
+            old=wheel[field]; wheel[field]=value
+            mod.fillStruct(out,1/60)
+            self.assertEqual(out.lockRatio,0,field)
+            wheel[field]=old
+        self.lua.globals().forwardSpeed=0
+        mod.fillStruct(out,1/60)
+        self.assertEqual(out.lockRatio,0)  # Sideways sliding, airspeed still 20.
+        self.lua.globals().forwardSpeed=-20
+        mod.fillStruct(out,1/60)
+        self.assertEqual(out.lockRatio,1)
+        self.lua.globals().wheel.angularVelocityBrakeCouple=20/.3
+        mod.fillStruct(out,1/60)
+        self.assertAlmostEqual(out.lockRatio,0)
+
+    def test_visuals_only_follow_confirmed_feedback_and_expire(self):
+        mod=self.protocol(); out=self.lua.table()
+        self.lua.globals().electrics['values'].gearIndex=4
+        mod.fillStruct(out,1/60)
+        self.assertEqual(self.lua.globals().electrics['values'].controllerHapticsVisualTriggerRight,0)
+        self.lua.execute('electrics.values.controllerHapticsVisualTriggerRight=.7; electrics.values.controllerHapticsFeedbackTTL=.1; electrics.values.controllerHapticsOutputValid=1')
+        mod.fillStruct(out,.02)
+        self.assertEqual(self.lua.globals().electrics['values'].controllerHapticsVisualTriggerRight,.7)
+        mod.fillStruct(out,.2)
+        self.assertEqual(self.lua.globals().electrics['values'].controllerHapticsVisualTriggerRight,0)
+        self.assertEqual(self.lua.globals().electrics['values'].controllerHapticsOutputValid,0)
+
+    def test_diagnostics_validates_replies_and_clears_stale_outputs(self):
+        self.lua.execute('''
+          packets={}; sent={}; commands={}
+          veh={getID=function() return 42 end,queueLuaCommand=function(_,s) commands[#commands+1]=s end}
+          getPlayerVehicle=function() return veh end
+          be={getObjectByID=function(_,id) if id==42 then return veh end end}
+          sock={settimeout=function() end,setsockname=function() return true end,
+            setpeername=function() return true end,close=function() end,
+            send=function(_,s) sent[#sent+1]=s; return #s end,
+            receive=function() return table.remove(packets,1) end}
+          package.preload.socket=function() return {udp=function() return sock end} end
+          reply={version='1.0.26.0',seq=1,vehicle=42,telemetry=1,paired=1,enabled=1,applied=1,backend=2,
+            error=0,left=.2,right=.4,lt=.6,rt=.8,initMs=0,initPeakMs=0,scanMs=0,scanPeakMs=0,
+            outputMs=0,outputPeakMs=0,uninitPeakMs=0,slowCalls=0}
+          jsonDecode=function() return reply end
+        ''')
+        mod=self.load('lua/ge/extensions/controllerHapticsDiagnostics.lua')
+        mod.onUpdate(.04)
+        self.assertTrue(self.lua.globals().sent[1].startswith('BCQ1 1 42 0 '))
+        self.lua.execute("packets[1]='BCD1 {}'; reply.rt=0/0")
+        mod.onUpdate(.04)
+        self.assertFalse(mod.getStatus().available)
+        self.lua.execute("packets[1]='BCD1 {}'; reply.rt=.8; reply.seq=2")
+        mod.onUpdate(.04)
+        self.assertTrue(mod.getStatus().available)
+        self.assertIn('controllerHapticsVisualTriggerRight=0.80000',self.lua.globals().commands[1])
+        # A duplicate reply cannot refresh the timeout.
+        self.lua.execute("packets[1]='BCD1 {}'")
+        mod.onUpdate(.6)
+        self.assertFalse(mod.getStatus().available)
+        self.assertIn('controllerHapticsOutputValid=0',self.lua.globals().commands[2])
+        mod.onExtensionUnloaded()
 
     def test_ui_changes_only_write_modified_setting(self):
         self.lua.execute("""

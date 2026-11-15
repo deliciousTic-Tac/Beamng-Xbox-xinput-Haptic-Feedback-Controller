@@ -6,14 +6,9 @@
 -- haptic tuner to persist its values between sessions.
 local M = {}
 local avToRPM = 60 / (2 * math.pi)
-local visualTime = 0
-local visualLastGear = 0
-local visualShiftUntil = 0
-local visualShiftDirection = 1
 local settingsRefreshRemaining = 0
 local cachedSettings = {}
 local settingsRefreshInterval = 0.1 -- Simulation seconds; also invalidated on reset.
-local visualShiftDuration = 0.18
 local brakeLockScale = 0.85 -- Preserve the BCH1 receiver's historic tuning.
 
 local function number(x, fallback)
@@ -66,11 +61,8 @@ function M.isPhysicsStepUsed() return false end
 -- avoids an overlay during loading screens and after returning to gameplay.
 function M.init() end
 function M.reset()
-  visualTime = 0
-  visualLastGear = 0
-  visualShiftUntil = 0
-  visualShiftDirection = 1
   settingsRefreshRemaining = 0
+  if electrics and electrics.values then electrics.values.controllerHapticsFeedbackTTL = 0; electrics.values.controllerHapticsOutputValid = 0 end
   publishVisuals(electrics and electrics.values, 0, 0, 0, 0)
 end
 function M.getStructDefinition()
@@ -115,9 +107,19 @@ function M.fillStruct(o, dtSim)
   o.shiftMode, o.startupIntensity, o.startupInterval = c.shiftMode, c.startupIntensity, c.startupInterval
   o.absSensitivity, o.brakeLockIntensity = c.absSensitivity, c.brakeLockIntensity
   local e = electrics and electrics.values
+  -- Overlay channels are now last successful DLL commands, sampled by the GE
+  -- diagnostics extension. No duplicate Lua effect calculation.
+  if e then
+    e.controllerHapticsFeedbackTTL = math.max(0, number(e.controllerHapticsFeedbackTTL) - math.max(0, number(dtSim)))
+    if e.controllerHapticsFeedbackTTL <= 0 then
+      publishVisuals(e, 0, 0, 0, 0)
+      e.controllerHapticsOutputValid = 0
+    end
+  end
   -- The host already selects the first player's vehicle. Also guard explicitly.
   if not e or not playerInfo or not playerInfo.firstPlayerSeated or number(dtSim) <= 0 then
     publishVisuals(e, 0, 0, 0, 0)
+    if e then e.controllerHapticsOutputValid = 0; e.controllerHapticsFeedbackTTL = 0 end
     return
   end
   o.throttle = pedal(e.throttle_input or e.throttle)
@@ -148,55 +150,26 @@ function M.fillStruct(o, dtSim)
     o.starterActive = number(engine.starterEngagedCoef) > 0.01 and 1 or 0
   end
 
-  -- Optional lock heuristic: braked, loaded wheels moving much slower than car.
-  -- Not a precise tire slip estimator (drifts can still cause false positives).
-  if o.brake > 0.1 and o.speed > 5 and wheels and wheels.wheels then
+  -- Use forward speed rather than total airspeed: sideways motion is not
+  -- longitudinal braking slip. abs() also supports reversing.
+  local longitudinalSpeed = 0
+  if obj.getVelocity and obj.getDirectionVector then
+    longitudinalSpeed = math.abs(number(obj:getVelocity():dot(obj:getDirectionVector())))
+  end
+  if o.brake > 0.1 and longitudinalSpeed > 5 and wheels and wheels.wheels then
     local worst = 0
     for _, w in pairs(wheels.wheels) do
-      if not w.isBroken and number(w.downForceRaw) > 50 then
-        local surfaceSpeed = math.abs(number(w.angularVelocity)) * number(w.radius)
-        worst = math.max(worst, 1 - surfaceSpeed / o.speed)
+      local radius = positive(w.radius)
+      -- brakeTorque is capacity; brakingTorque is the current applied request.
+      if not w.isBroken and radius and number(w.downForceRaw) > 50
+          and number(w.brakeTorque) > 0 and number(w.brakingTorque) > 1 then
+        local av = number(w.angularVelocityBrakeCouple, number(w.angularVelocity))
+        local surfaceSpeed = math.abs(av) * radius
+        worst = math.max(worst, 1 - surfaceSpeed / longitudinalSpeed)
       end
     end
-    o.lockRatio = math.min(1, math.max(0, worst))
+    o.lockRatio = pedal(worst)
   end
-
-  -- Approximate visual indicators, NOT actuator feedback: the DLL applies its
-  -- own pulse timing, scaling and connection state. BCH1 remains one-way.
-  visualTime = visualTime + number(dtSim)
-  local bodyLeft, bodyRight, triggerLeft, triggerRight = 0, 0, 0, 0
-  if o.throttle > 0.08 and o.limitRPM > 0 and o.rpm / o.limitRPM >= o.rtStart then
-    triggerRight = o.rtIntensity
-  end
-  local lockThreshold = math.max(0.05, 0.65 * (1 - o.absSensitivity))
-  if o.brake > 0.1 and o.speed > 2 and (o.absActive > 0 or o.lockRatio > lockThreshold) then
-    triggerLeft = o.hasABS <= 0 and o.lockRatio > lockThreshold and o.brakeLockIntensity or o.absIntensity
-  end
-  if o.starterActive > 0 then
-    bodyLeft, bodyRight = o.startupIntensity, o.startupIntensity
-  end
-
-  -- Preserve the last non-neutral gear: sequential/race gearboxes often pass
-  -- through neutral for one frame while changing ratio.
-  if o.gearIndex ~= 0 then
-    if visualLastGear ~= 0 and o.gearIndex ~= visualLastGear then
-      visualShiftDirection = o.gearIndex > visualLastGear and 1 or -1
-      visualShiftUntil = visualTime + visualShiftDuration
-    end
-    visualLastGear = o.gearIndex
-  end
-  if visualTime < visualShiftUntil then
-    local shiftMode = math.floor(o.shiftMode * 2 + 0.5)
-    if shiftMode == 0 or shiftMode == 2 then
-      if visualShiftDirection > 0 then bodyRight = math.max(bodyRight, o.shiftIntensity)
-      else bodyLeft = math.max(bodyLeft, o.shiftIntensity) end
-    end
-    if shiftMode == 1 or shiftMode == 2 then
-      if visualShiftDirection > 0 then triggerRight = math.max(triggerRight, o.shiftIntensity)
-      else triggerLeft = math.max(triggerLeft, o.shiftIntensity) end
-    end
-  end
-  publishVisuals(e, bodyLeft, bodyRight, triggerLeft, triggerRight)
 end
 
 return M

@@ -2,3 +2,4 @@
 -- keeps the requested extension loaded. Keep this entry point flat: nested
 -- extension loads can re-enter the mod manager during its mount pass.
 extensions.load('controllerHapticsBootstrap')
+extensions.load('controllerHapticsDiagnostics')
